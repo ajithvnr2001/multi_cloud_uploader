@@ -1,0 +1,25 @@
+# Ignore build context files
+.dockerignore
+Dockerfile
+
+# Ignore Git files
+.git
+.gitignore
+
+# Ignore Python cache and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Ignore downloaded files and job status files
+temp_downloads/
+job_status/
+
+# Ignore IDE/editor files (optional)
+.idea/
+.vscode/
