@@ -4,6 +4,11 @@ FROM python:3.10-slim
 # Set the working directory in the container
 WORKDIR /app
 
+# --- NEW: Set AWS Checksum ENV Variables ---
+ENV AWS_REQUEST_CHECKSUM_CALCULATION=when_required
+ENV AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+# --- END NEW ---
+
 # Copy the requirements file into the container
 COPY requirements.txt .
 
@@ -13,9 +18,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy all the python code into the container
 COPY . .
 
-# --- NEW: Explicitly copy worker.py again ---
-COPY worker.py .
-# --- END NEW ---
 
 # Create directories for job state and temporary downloads
 RUN mkdir -p /app/job_status

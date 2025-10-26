@@ -6,34 +6,35 @@ import threading
 import json
 from botocore.exceptions import ClientError
 from botocore.client import Config
-import sys # Import sys for exiting
+from boto3.s3.transfer import TransferConfig # Required import
+import sys
+from urllib.parse import quote
 
 # --- Configuration ---
 # Read credentials and IDs securely from environment variables
 
-# Cloudflare R2 Configuration
-# --- NEW: Get Account ID and Bucket Name from environment ---
+# --- Cloudflare R2 Configuration ---
 R2_ACCOUNT_ID = os.environ.get('R2_ACCOUNT_ID')
-R2_BUCKET_NAME = os.environ.get('R2_BUCKET_NAME', 'movies1') # Default if not set
+R2_BUCKET_NAME = os.environ.get('R2_BUCKET_NAME', 'r2-default-bucket')
 R2_ENDPOINT_URL = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_ACCOUNT_ID else None
-# --- END NEW ---
+R2_MAX_SIZE_GB = 19.5 # Defined limit
 
 R2_CONFIG = {
     'name': 'Cloudflare R2',
     'config': {
         'service_name': 's3',
-        'endpoint_url': R2_ENDPOINT_URL, # <-- CHANGED
+        'endpoint_url': R2_ENDPOINT_URL,
         'aws_access_key_id': os.environ.get('R2_ACCESS_KEY_ID'),
         'aws_secret_access_key': os.environ.get('R2_SECRET_ACCESS_KEY'),
         'region_name': 'auto',
         'config': Config(signature_version='s3v4')
     },
-    'bucket_name': R2_BUCKET_NAME, # <-- CHANGED
-    'max_size_gb': 9.5
+    'bucket_name': R2_BUCKET_NAME,
+    'max_size_gb': R2_MAX_SIZE_GB # Reference the defined limit
 }
 
-# ImpossibleCloud Configuration
-IMPOSSIBLE_BUCKET_NAME = os.environ.get('IMPOSSIBLE_BUCKET_NAME', 'vnrbnr') # Default if not set
+# --- ImpossibleCloud Configuration ---
+IMPOSSIBLE_BUCKET_NAME = os.environ.get('IMPOSSIBLE_BUCKET_NAME', 'impossible-default-bucket')
 IMPOSSIBLE_CONFIG = {
     'name': 'ImpossibleCloud',
     'config': {
@@ -43,12 +44,12 @@ IMPOSSIBLE_CONFIG = {
         'endpoint_url': 'https://eu-central-2.storage.impossibleapi.net',
         'region_name': 'eu-central-2'
     },
-    'bucket_name': IMPOSSIBLE_BUCKET_NAME, # <-- CHANGED
+    'bucket_name': IMPOSSIBLE_BUCKET_NAME,
     'max_size_gb': None
 }
 
-# Wasabi Configuration
-WASABI_BUCKET_NAME = os.environ.get('WASABI_BUCKET_NAME', 'thisismybuck') # Default if not set
+# --- Wasabi Configuration ---
+WASABI_BUCKET_NAME = os.environ.get('WASABI_BUCKET_NAME', 'wasabi-default-bucket')
 WASABI_CONFIG = {
     'name': 'Wasabi',
     'config': {
@@ -58,49 +59,71 @@ WASABI_CONFIG = {
         'endpoint_url': 'https://s3.ap-northeast-1.wasabisys.com',
         'region_name': 'ap-northeast-1'
     },
-    'bucket_name': WASABI_BUCKET_NAME, # <-- CHANGED
+    'bucket_name': WASABI_BUCKET_NAME,
     'max_size_gb': None
 }
 
-CLOUDS = [R2_CONFIG, IMPOSSIBLE_CONFIG, WASABI_CONFIG]
+# --- Oracle Cloud (OCI) Configuration ---
+OCI_NAMESPACE = os.environ.get('OCI_NAMESPACE')
+OCI_REGION = os.environ.get('OCI_REGION', 'ap-hyderabad-1')
+OCI_BUCKET_NAME = os.environ.get('OCI_BUCKET_NAME', 'oci-default-bucket')
+OCI_ENDPOINT_URL = f"https://{OCI_NAMESPACE}.compat.objectstorage.{OCI_REGION}.oraclecloud.com" if OCI_NAMESPACE and OCI_REGION else None
+
+OCI_CONFIG = {
+    'name': 'Oracle Cloud',
+    'config': {
+        'service_name': 's3',
+        'aws_access_key_id': os.environ.get('OCI_ACCESS_KEY_ID'),
+        'aws_secret_access_key': os.environ.get('OCI_SECRET_ACCESS_KEY'),
+        'endpoint_url': OCI_ENDPOINT_URL,
+        'region_name': OCI_REGION
+    },
+    'bucket_name': OCI_BUCKET_NAME,
+    'max_size_gb': None, # We apply the limit logic externally now
+    'oci_namespace': OCI_NAMESPACE,
+    'oci_region': OCI_REGION
+}
+
+# Combine all cloud configs
+CLOUDS = [R2_CONFIG, IMPOSSIBLE_CONFIG, WASABI_CONFIG, OCI_CONFIG]
 DOWNLOAD_DIR = 'temp_downloads'
 STATUS_DIR = 'job_status'
 
-# --- Check if any required environment variables are missing ---
+# --- Check Environment Variables ---
+# (Keep the existing checks section - no changes needed here)
 missing_vars = []
-# --- NEW: Added checks for R2 Account ID and Endpoint URL ---
+# R2
 if not R2_ACCOUNT_ID: missing_vars.append('R2_ACCOUNT_ID')
 if not R2_ENDPOINT_URL: missing_vars.append('R2_ENDPOINT_URL (derived from R2_ACCOUNT_ID)')
-# --- END NEW ---
 if not R2_CONFIG['config']['aws_access_key_id']: missing_vars.append('R2_ACCESS_KEY_ID')
 if not R2_CONFIG['config']['aws_secret_access_key']: missing_vars.append('R2_SECRET_ACCESS_KEY')
+# Impossible
 if not IMPOSSIBLE_CONFIG['config']['aws_access_key_id']: missing_vars.append('IMPOSSIBLE_ACCESS_KEY_ID')
 if not IMPOSSIBLE_CONFIG['config']['aws_secret_access_key']: missing_vars.append('IMPOSSIBLE_SECRET_ACCESS_KEY')
+# Wasabi
 if not WASABI_CONFIG['config']['aws_access_key_id']: missing_vars.append('WASABI_ACCESS_KEY_ID')
 if not WASABI_CONFIG['config']['aws_secret_access_key']: missing_vars.append('WASABI_SECRET_ACCESS_KEY')
-
-# Check bucket names (optional, as they have defaults)
-# if not R2_BUCKET_NAME: missing_vars.append('R2_BUCKET_NAME')
-# if not IMPOSSIBLE_BUCKET_NAME: missing_vars.append('IMPOSSIBLE_BUCKET_NAME')
-# if not WASABI_BUCKET_NAME: missing_vars.append('WASABI_BUCKET_NAME')
-
+# OCI
+if not OCI_NAMESPACE: missing_vars.append('OCI_NAMESPACE')
+if not OCI_REGION: missing_vars.append('OCI_REGION')
+if not OCI_ENDPOINT_URL: missing_vars.append('OCI_ENDPOINT_URL (derived from OCI_NAMESPACE/OCI_REGION)')
+if not OCI_CONFIG['config']['aws_access_key_id']: missing_vars.append('OCI_ACCESS_KEY_ID')
+if not OCI_CONFIG['config']['aws_secret_access_key']: missing_vars.append('OCI_SECRET_ACCESS_KEY')
 
 if missing_vars:
     print(f"ERROR: Missing required environment variables: {', '.join(missing_vars)}")
     sys.exit(f"FATAL: Missing environment variables: {', '.join(missing_vars)}")
 
-# --- Boto3 Helper Functions ---
 
+# --- Boto3 Helper Functions ---
+# (Keep initialize_client, get_bucket_size, generate_presigned_url, generate_oci_public_url - no changes needed here)
 def initialize_client(config_dict):
     """Initialize S3 client."""
-    # Check if keys and endpoint are present before initializing
-    if (not config_dict['config']['aws_access_key_id'] or
-            not config_dict['config']['aws_secret_access_key'] or
-            not config_dict['config']['endpoint_url']):
+    required_keys = ['aws_access_key_id', 'aws_secret_access_key', 'endpoint_url']
+    if any(not config_dict['config'].get(key) for key in required_keys):
         print(f"Warning: Missing credentials or endpoint for {config_dict['name']}. Skipping client initialization.")
         return None
     try:
-        # Pass only the necessary keys to boto3.client
         client_config = {
             'service_name': config_dict['config']['service_name'],
             'endpoint_url': config_dict['config']['endpoint_url'],
@@ -108,54 +131,72 @@ def initialize_client(config_dict):
             'aws_secret_access_key': config_dict['config']['aws_secret_access_key'],
             'region_name': config_dict['config']['region_name']
         }
-        # Add botocore config only if present (R2 needs it)
-        if 'config' in config_dict['config']:
+        if 'config' in config_dict['config'] and isinstance(config_dict['config']['config'], Config):
              client_config['config'] = config_dict['config']['config']
-
         return boto3.client(**client_config)
     except Exception as e:
         print(f"Error initializing client for {config_dict['name']}: {e}")
         return None
 
-
 def get_bucket_size(client, bucket_name):
     """Calculate total size of all files in the bucket"""
-    if not client: # Handle case where client initialization failed
+    if not client:
         print(f"Skipping get_bucket_size for {bucket_name}: client not initialized.")
         return 0
     total_size = 0
     try:
         paginator = client.get_paginator('list_objects_v2')
-        pages = paginator.paginate(Bucket=bucket_name)
-        for page in pages:
+        page_iterator = paginator.paginate(Bucket=bucket_name)
+        for page in page_iterator:
             if 'Contents' in page:
                 for obj in page['Contents']:
-                    total_size += obj['Size']
-        return total_size
+                    total_size += obj.get('Size', 0)
     except ClientError as e:
         print(f"Error getting bucket size for {bucket_name}: {e}")
-        # If bucket doesn't exist, treat size as 0
         if e.response['Error']['Code'] == 'NoSuchBucket':
              print(f"Bucket {bucket_name} does not exist.")
              return 0
-        # Re-raise other errors if needed, or return 0
-        return 0 # Fail safe
+        return 0
+    except Exception as e:
+        print(f"Unexpected error getting bucket size for {bucket_name}: {e}")
+        return 0
+    return total_size
 
 def generate_presigned_url(client, bucket_name, file_name, expiration=3600):
-    """Generate presigned URL for access"""
-    if not client: # Handle case where client initialization failed
+    # ... (Keep existing generate_presigned_url code) ...
+    if not client:
         print(f"Skipping generate_presigned_url for {file_name}: client not initialized.")
         return None
     try:
-        return client.generate_presigned_url('get_object', Params={'Bucket': bucket_name, 'Key': file_name}, ExpiresIn=expiration)
+        url = client.generate_presigned_url('get_object',
+                                             Params={'Bucket': bucket_name, 'Key': file_name},
+                                             ExpiresIn=expiration)
+        return url
     except ClientError as e:
         print(f"Error generating presigned URL for {file_name} in {bucket_name}: {e}")
         return None
+    except Exception as e:
+        print(f"Unexpected error generating presigned URL for {file_name} in {bucket_name}: {e}")
+        return None
+
+def generate_oci_public_url(oci_namespace, oci_region, bucket_name, file_name):
+    # ... (Keep existing generate_oci_public_url code) ...
+    if not all([oci_namespace, oci_region, bucket_name, file_name]):
+        print("Warning: Missing info for OCI public URL generation.")
+        return None
+    try:
+        encoded_name = quote(file_name, safe='')
+        url = f"https://objectstorage.{oci_region}.oraclecloud.com/n/{oci_namespace}/b/{bucket_name}/o/{encoded_name}"
+        return url
+    except Exception as e:
+        print(f"Error generating OCI public URL for {file_name}: {e}")
+        return None
+
 
 # --- Progress Update Functions ---
-
+# (Keep update_job_progress and ProgressTracker class - no changes needed here)
 def update_job_progress(job_id, progress_data):
-    """Updates job progress in a JSON file for the UI to read."""
+    # ... (Keep existing update_job_progress code) ...
     try:
         status_file = os.path.join(STATUS_DIR, f"{job_id}.json")
         with open(status_file, 'w') as f:
@@ -164,7 +205,7 @@ def update_job_progress(job_id, progress_data):
         print(f"Error updating progress for {job_id}: {e}")
 
 class ProgressTracker:
-    """Updates progress for a specific cloud during upload."""
+    # ... (Keep existing ProgressTracker code) ...
     def __init__(self, job_id, cloud_name, total_size, progress_data):
         self.job_id = job_id
         self.cloud_name = cloud_name
@@ -180,7 +221,6 @@ class ProgressTracker:
         with self._lock:
             self.bytes_transferred += new_bytes
             percentage = min(int((self.bytes_transferred / self.total_size) * 100), 100)
-
             current_time = time.time()
             if current_time - self.last_time > 1.0:
                 time_diff = current_time - self.last_time
@@ -189,10 +229,7 @@ class ProgressTracker:
                 self.speed_str = f"{speed / (1024*1024):.2f} MB/s"
                 self.last_time = current_time
                 self.last_bytes = self.bytes_transferred
-
             size_str = f"{self.bytes_transferred / (1024*1024):.2f} MB / {self.total_size / (1024*1024):.2f} MB ({self.speed_str})"
-
-            # Update the main progress dictionary safely
             if self.cloud_name in self.progress_data.get('clouds', {}):
                 self.progress_data['clouds'][self.cloud_name].update({
                     'stage': 'uploading',
@@ -207,36 +244,29 @@ class ProgressTracker:
                 }
             update_job_progress(self.job_id, self.progress_data)
 
-# --- Main Task Functions ---
 
+# --- Main Task Functions ---
+# (Keep download_file_with_progress_task - no changes needed here)
 def download_file_with_progress_task(job_id, url, temp_filepath, progress_data):
-    """Downloads file and updates progress."""
+    # ... (Keep existing download task code) ...
     progress_data['download'] = {'stage': 'downloading', 'percentage': 0, 'message': 'Starting...'}
     update_job_progress(job_id, progress_data)
-
     try:
-        # Use a longer timeout for potentially large files
-        with requests.get(url, stream=True, timeout=60) as r: # Increased timeout
+        with requests.get(url, stream=True, timeout=60) as r:
             r.raise_for_status()
             total_size = int(r.headers.get('content-length', 0))
             downloaded_size = 0
-
             last_time = time.time()
             last_bytes = 0
             speed_str = "0 MB/s"
-
             with open(temp_filepath, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192 * 4): # Increased chunk size
-                    if not chunk: # Handle empty chunks
-                         continue
+                for chunk in r.iter_content(chunk_size=8192 * 4):
+                    if not chunk: continue
                     f.write(chunk)
                     downloaded_size += len(chunk)
-
                     if total_size > 0:
                         percentage = min(int((downloaded_size / total_size) * 100), 100)
-
                         current_time = time.time()
-                        # Update progress less frequently if needed, e.g., every 2 seconds
                         if current_time - last_time > 1.0:
                             time_diff = current_time - last_time
                             bytes_diff = downloaded_size - last_bytes
@@ -244,59 +274,70 @@ def download_file_with_progress_task(job_id, url, temp_filepath, progress_data):
                             speed_str = f"{speed / (1024*1024):.2f} MB/s"
                             last_time = current_time
                             last_bytes = downloaded_size
-
-                            # Update the json file only on interval to reduce I/O
                             size_str = f"{downloaded_size / (1024*1024):.2f} MB / {total_size / (1024*1024):.2f} MB ({speed_str})"
                             progress_data['download'] = {'stage': 'downloading', 'percentage': percentage, 'message': size_str}
                             update_job_progress(job_id, progress_data)
-
             msg = f"Complete: {downloaded_size / (1024*1024):.2f} MB"
             progress_data['download'] = {'stage': 'completed', 'percentage': 100, 'message': msg}
             update_job_progress(job_id, progress_data)
             return temp_filepath, downloaded_size
-
     except Exception as e:
         msg = f"Error: {e}"
         progress_data['download'] = {'stage': 'failed', 'percentage': 0, 'message': msg}
         progress_data['status'] = 'failed'
         update_job_progress(job_id, progress_data)
-        raise # Reraise the exception so the worker knows the job failed
+        raise
 
-def upload_file_to_cloud_task(job_id, cloud, temp_filepath, progress_data):
-    """Uploads a single file to a specific cloud with progress"""
-    cloud_name = cloud['name']
-    # Ensure clouds dict exists
+# --- UPDATED: upload_file_to_cloud_task ---
+def upload_file_to_cloud_task(job_id, cloud_config, temp_filepath, progress_data):
+    """Uploads file & generates URL. Uses upload_file for ALL clouds. Checks size limit for R2 and OCI."""
+    cloud_name = cloud_config['name']
     progress_data.setdefault('clouds', {})[cloud_name] = {'stage': 'pending', 'percentage': 0, 'message': 'Waiting...'}
     update_job_progress(job_id, progress_data)
 
-    try:
-        client = initialize_client(cloud)
-        if not client:
-            msg = "Skipped: Client initialization failed (check credentials/endpoint)."
-            progress_data['clouds'][cloud_name] = {'stage': 'skipped', 'percentage': 0, 'message': msg}
-            update_job_progress(job_id, progress_data)
-            return # Skip upload if client failed
+    upload_success = False
+    final_url = None
+    error_message = None
+    client = None # Initialize client variable
 
-        # Cloudflare R2 size check
-        if cloud_name == R2_CONFIG['name']:
+    try:
+        client = initialize_client(cloud_config)
+        if not client:
+            raise ConnectionError("Client initialization failed (check credentials/endpoint).")
+
+        bucket_name = cloud_config['bucket_name']
+        filename = progress_data['filename']
+
+        # --- MODIFIED: Size Check for Cloudflare R2 AND Oracle Cloud ---
+        SIZE_LIMIT_GB = 19.5 # Define the common limit
+        # Check if the current cloud requires a size limit check
+        if cloud_name == R2_CONFIG['name'] or cloud_name == OCI_CONFIG['name']:
+            print(f"DEBUG: Performing size check for {cloud_name} (Limit: {SIZE_LIMIT_GB}GB).")
             progress_data['clouds'][cloud_name]['stage'] = 'checking'
-            progress_data['clouds'][cloud_name]['message'] = 'Checking bucket size...'
+            progress_data['clouds'][cloud_name]['message'] = f'Checking bucket size (Limit: {SIZE_LIMIT_GB}GB)...'
             update_job_progress(job_id, progress_data)
 
             if not os.path.exists(temp_filepath):
                  raise FileNotFoundError(f"Temporary file not found: {temp_filepath}")
             new_file_size = os.path.getsize(temp_filepath)
-            max_bytes = R2_CONFIG['max_size_gb'] * 1024 ** 3
-            existing_size = get_bucket_size(client, cloud['bucket_name'])
+            max_bytes = SIZE_LIMIT_GB * 1024 ** 3 # Convert GB limit to bytes
+            existing_size = get_bucket_size(client, bucket_name)
+
+            print(f"DEBUG: {cloud_name} - Existing: {existing_size}, New: {new_file_size}, Total: {existing_size + new_file_size}, Max: {max_bytes}")
 
             if existing_size + new_file_size > max_bytes:
                 excess_gb = ((existing_size + new_file_size) - max_bytes) / 1024**3
-                msg = f"Skipped: Would exceed {R2_CONFIG['max_size_gb']}GB limit by {excess_gb:.2f} GB."
+                msg = f"Skipped: Would exceed {SIZE_LIMIT_GB}GB limit by {excess_gb:.2f} GB."
+                print(f"DEBUG: {cloud_name} - {msg}") # Log skip reason
                 progress_data['clouds'][cloud_name] = {'stage': 'skipped', 'percentage': 0, 'message': msg}
                 update_job_progress(job_id, progress_data)
                 return # Skip this specific upload
+            else:
+                 print(f"DEBUG: {cloud_name} - Size check passed.")
+        # --- End Size Check ---
 
-        # Start upload
+
+        # --- Check file existence and size ---
         if not os.path.exists(temp_filepath):
              raise FileNotFoundError(f"Temporary file not found before upload: {temp_filepath}")
         file_size = os.path.getsize(temp_filepath)
@@ -306,24 +347,78 @@ def upload_file_to_cloud_task(job_id, cloud, temp_filepath, progress_data):
             update_job_progress(job_id, progress_data)
             return
 
+        # --- Start upload using upload_file for ALL clouds ---
         progress_callback = ProgressTracker(job_id, cloud_name, file_size, progress_data)
-
-        client.upload_file(
-            temp_filepath,
-            cloud['bucket_name'],
-            progress_data['filename'],
-            Callback=progress_callback
+        transfer_config = TransferConfig( # Define TransferConfig for all
+            multipart_threshold=8 * 1024 * 1024,
+            max_concurrency=10,
+            multipart_chunksize=8 * 1024 * 1024,
+            use_threads=True
         )
 
-        url = generate_presigned_url(client, cloud['bucket_name'], progress_data['filename'])
-        msg = f"Complete. Link: {url}" if url else "Complete (Link generation failed)."
-        progress_data['clouds'][cloud_name] = {'stage': 'completed', 'percentage': 100, 'message': msg}
+        # Update status to uploading before starting
+        progress_data['clouds'][cloud_name]['stage'] = 'uploading'
+        progress_data['clouds'][cloud_name]['percentage'] = 0
+        progress_data['clouds'][cloud_name]['message'] = f"0 MB / {file_size / (1024*1024):.2f} MB (Starting...)"
         update_job_progress(job_id, progress_data)
 
+        print(f"DEBUG: Using upload_file for {cloud_name}.")
+        upload_args = {
+            'Filename': temp_filepath,
+            'Bucket': bucket_name,
+            'Key': filename,
+            'Callback': progress_callback,
+            'Config': transfer_config # Use TransferConfig for ALL clouds
+        }
+        client.upload_file(**upload_args)
+        # --- End Upload Logic ---
+
+        upload_success = True # Assume success if no exception raised
+        print(f"DEBUG: Upload seems successful for {cloud_name}, job {job_id}")
+
     except Exception as e:
-        msg = f"Upload failed: {e}"
-        progress_data['clouds'][cloud_name] = {'stage': 'failed', 'percentage': 0, 'message': msg}
+        error_message = f"Upload failed: {e}"
+        print(f"ERROR: Upload to {cloud_name} failed for job {job_id}: {e}")
+        print(f"ERROR Type: {type(e).__name__}")
+
+    # --- Update final status and generate URL ---
+    # (Keep the existing URL generation logic)
+    if upload_success and client:
+        progress_data['clouds'][cloud_name]['stage'] = 'generating_url'
+        progress_data['clouds'][cloud_name]['message'] = 'Generating URL...'
         update_job_progress(job_id, progress_data)
-        # Don't mark the whole job failed just because one cloud failed
-        # Don't re-raise, let other clouds continue
-        print(f"Upload to {cloud_name} failed for job {job_id}: {e}") # Log the error
+
+        if cloud_name == 'Oracle Cloud':
+            final_url = generate_oci_public_url(
+                cloud_config.get('oci_namespace'),
+                cloud_config.get('oci_region'),
+                bucket_name,
+                filename
+            )
+            if not final_url:
+                 print(f"DEBUG: OCI public URL failed or not applicable for {filename}, using presigned.")
+                 final_url = generate_presigned_url(client, bucket_name, filename, expiration=604800)
+                 url_type = "Presigned (7 days)"
+            else:
+                 url_type = "Public (Permanent*)"
+        else:
+            final_url = generate_presigned_url(client, bucket_name, filename, expiration=604800)
+            url_type = "Presigned (7 days)"
+
+        if final_url:
+             # Just output the URL directly
+             msg = f"Complete. {url_type}: {final_url}"
+             progress_data['clouds'][cloud_name] = {'stage': 'completed', 'percentage': 100, 'message': msg}
+        else:
+             msg = "Complete (URL generation failed)."
+             progress_data['clouds'][cloud_name] = {'stage': 'completed', 'percentage': 100, 'message': msg}
+
+    elif not upload_success:
+        msg = error_message if error_message else "Upload failed: Unknown error"
+        progress_data['clouds'][cloud_name] = {'stage': 'failed', 'percentage': 0, 'message': msg}
+    elif not client:
+         msg = "Failed: Client initialization failed"
+         progress_data['clouds'][cloud_name] = {'stage': 'failed', 'percentage': 0, 'message': msg}
+
+    update_job_progress(job_id, progress_data)
+# --- END upload_file_to_cloud_task ---
