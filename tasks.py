@@ -27,7 +27,7 @@ R2_CONFIG = {
         'aws_access_key_id': os.environ.get('R2_ACCESS_KEY_ID'),
         'aws_secret_access_key': os.environ.get('R2_SECRET_ACCESS_KEY'),
         'region_name': 'auto',
-        'config': Config(signature_version='s3v4')
+        'config': Config(signature_version='s3v4') # Corrected signature version
     },
     'bucket_name': R2_BUCKET_NAME,
     'max_size_gb': R2_MAX_SIZE_GB # Reference the defined limit
@@ -89,8 +89,7 @@ CLOUDS = [R2_CONFIG, IMPOSSIBLE_CONFIG, WASABI_CONFIG, OCI_CONFIG]
 DOWNLOAD_DIR = 'temp_downloads'
 STATUS_DIR = 'job_status'
 
-# --- Check Environment Variables ---
-# (Keep the existing checks section - no changes needed here)
+# --- Check if any required environment variables are missing ---
 missing_vars = []
 # R2
 if not R2_ACCOUNT_ID: missing_vars.append('R2_ACCOUNT_ID')
@@ -116,7 +115,6 @@ if missing_vars:
 
 
 # --- Boto3 Helper Functions ---
-# (Keep initialize_client, get_bucket_size, generate_presigned_url, generate_oci_public_url - no changes needed here)
 def initialize_client(config_dict):
     """Initialize S3 client."""
     required_keys = ['aws_access_key_id', 'aws_secret_access_key', 'endpoint_url']
@@ -163,7 +161,7 @@ def get_bucket_size(client, bucket_name):
     return total_size
 
 def generate_presigned_url(client, bucket_name, file_name, expiration=3600):
-    # ... (Keep existing generate_presigned_url code) ...
+    """Generate presigned URL for access (standard S3/R2/Wasabi/Impossible)"""
     if not client:
         print(f"Skipping generate_presigned_url for {file_name}: client not initialized.")
         return None
@@ -180,7 +178,7 @@ def generate_presigned_url(client, bucket_name, file_name, expiration=3600):
         return None
 
 def generate_oci_public_url(oci_namespace, oci_region, bucket_name, file_name):
-    # ... (Keep existing generate_oci_public_url code) ...
+    """Generate public URLs for OCI Object Storage."""
     if not all([oci_namespace, oci_region, bucket_name, file_name]):
         print("Warning: Missing info for OCI public URL generation.")
         return None
@@ -194,9 +192,8 @@ def generate_oci_public_url(oci_namespace, oci_region, bucket_name, file_name):
 
 
 # --- Progress Update Functions ---
-# (Keep update_job_progress and ProgressTracker class - no changes needed here)
 def update_job_progress(job_id, progress_data):
-    # ... (Keep existing update_job_progress code) ...
+    """Updates job progress in a JSON file."""
     try:
         status_file = os.path.join(STATUS_DIR, f"{job_id}.json")
         with open(status_file, 'w') as f:
@@ -205,7 +202,7 @@ def update_job_progress(job_id, progress_data):
         print(f"Error updating progress for {job_id}: {e}")
 
 class ProgressTracker:
-    # ... (Keep existing ProgressTracker code) ...
+    """Updates progress for a specific cloud during upload."""
     def __init__(self, job_id, cloud_name, total_size, progress_data):
         self.job_id = job_id
         self.cloud_name = cloud_name
@@ -246,49 +243,99 @@ class ProgressTracker:
 
 
 # --- Main Task Functions ---
-# (Keep download_file_with_progress_task - no changes needed here)
+
+# --- UPDATED: download_file_with_progress_task ---
 def download_file_with_progress_task(job_id, url, temp_filepath, progress_data):
-    # ... (Keep existing download task code) ...
+    """Downloads file, updates progress, and checks for cancellation signal frequently."""
     progress_data['download'] = {'stage': 'downloading', 'percentage': 0, 'message': 'Starting...'}
     update_job_progress(job_id, progress_data)
+    cancel_file = os.path.join(STATUS_DIR, f"{job_id}.cancel") # Define cancel file path
+    start_time = time.time()
+    last_cancel_check_time = time.time() # Track when we last checked cancel file
+
     try:
+        print(f"DEBUG [{job_id}]: Starting download request for {url}") # Log start
         with requests.get(url, stream=True, timeout=60) as r:
             r.raise_for_status()
             total_size = int(r.headers.get('content-length', 0))
             downloaded_size = 0
-            last_time = time.time()
+            last_progress_update_time = time.time()
             last_bytes = 0
             speed_str = "0 MB/s"
+            percentage = 0 # Initialize percentage
+
+            print(f"DEBUG [{job_id}]: Opened connection. Total size: {total_size}") # Log connection open
+
             with open(temp_filepath, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192 * 4):
+                # Check cancellation more frequently
+                for chunk_num, chunk in enumerate(r.iter_content(chunk_size=8192 * 4)): # Increased chunk size might help speed
+
+                    # Check for cancellation signal roughly every second
+                    current_time_for_cancel_check = time.time()
+                    if current_time_for_cancel_check - last_cancel_check_time > 1.0:
+                        # print(f"DEBUG [{job_id}]: Checking for cancel file...") # Can be noisy
+                        if os.path.exists(cancel_file):
+                            print(f"EVENT [{job_id}]: Cancellation signal file found. Stopping download.")
+                            f.close()
+                            if os.path.exists(temp_filepath): os.remove(temp_filepath)
+                            progress_data['download'] = {'stage': 'cancelled', 'percentage': percentage, 'message': 'Download cancelled by user.'}
+                            progress_data['status'] = 'cancelled'
+                            update_job_progress(job_id, progress_data)
+                            if os.path.exists(cancel_file): os.remove(cancel_file)
+                            return None, -1 # Signal cancellation
+                        last_cancel_check_time = current_time_for_cancel_check # Update check time
+
                     if not chunk: continue
                     f.write(chunk)
                     downloaded_size += len(chunk)
+
+                    # Progress Update Logic
                     if total_size > 0:
                         percentage = min(int((downloaded_size / total_size) * 100), 100)
-                        current_time = time.time()
-                        if current_time - last_time > 1.0:
-                            time_diff = current_time - last_time
+                        current_time_for_progress = time.time()
+                        # Update progress status ~once per second
+                        if current_time_for_progress - last_progress_update_time > 1.0:
+                            time_diff = current_time_for_progress - last_progress_update_time
                             bytes_diff = downloaded_size - last_bytes
                             speed = (bytes_diff / time_diff) if time_diff > 0 else 0
                             speed_str = f"{speed / (1024*1024):.2f} MB/s"
-                            last_time = current_time
+                            last_progress_update_time = current_time_for_progress
                             last_bytes = downloaded_size
                             size_str = f"{downloaded_size / (1024*1024):.2f} MB / {total_size / (1024*1024):.2f} MB ({speed_str})"
                             progress_data['download'] = {'stage': 'downloading', 'percentage': percentage, 'message': size_str}
                             update_job_progress(job_id, progress_data)
+                    # End Progress Update Logic
+
+            # Download finished successfully
+            print(f"DEBUG [{job_id}]: Download loop finished.") # Log loop end
             msg = f"Complete: {downloaded_size / (1024*1024):.2f} MB"
             progress_data['download'] = {'stage': 'completed', 'percentage': 100, 'message': msg}
             update_job_progress(job_id, progress_data)
             return temp_filepath, downloaded_size
-    except Exception as e:
-        msg = f"Error: {e}"
-        progress_data['download'] = {'stage': 'failed', 'percentage': 0, 'message': msg}
-        progress_data['status'] = 'failed'
-        update_job_progress(job_id, progress_data)
-        raise
 
-# --- UPDATED: upload_file_to_cloud_task ---
+    except Exception as e:
+        print(f"ERROR [{job_id}]: Exception during download: {type(e).__name__} - {e}") # Log exception
+        # Check if cancellation happened just before exception
+        if os.path.exists(cancel_file):
+             print(f"DEBUG [{job_id}]: Download exception likely due to cancellation.")
+             if os.path.exists(temp_filepath): os.remove(temp_filepath)
+             progress_data['download'] = {'stage': 'cancelled', 'percentage': 0, 'message': 'Download cancelled by user.'}
+             progress_data['status'] = 'cancelled'
+             update_job_progress(job_id, progress_data)
+             if os.path.exists(cancel_file): os.remove(cancel_file)
+             return None, -1 # Signal cancellation
+        else:
+             # Genuine download error
+             msg = f"Error: {e}"
+             progress_data['download'] = {'stage': 'failed', 'percentage': 0, 'message': msg}
+             progress_data['status'] = 'failed'
+             update_job_progress(job_id, progress_data)
+             raise # Re-raise the exception for the worker
+# --- END UPDATED download_file_with_progress_task ---
+
+
+# --- upload_file_to_cloud_task ---
+# (Keep this function exactly as the previous version - using upload_file for all, checking limits for R2/OCI)
 def upload_file_to_cloud_task(job_id, cloud_config, temp_filepath, progress_data):
     """Uploads file & generates URL. Uses upload_file for ALL clouds. Checks size limit for R2 and OCI."""
     cloud_name = cloud_config['name']
@@ -298,82 +345,56 @@ def upload_file_to_cloud_task(job_id, cloud_config, temp_filepath, progress_data
     upload_success = False
     final_url = None
     error_message = None
-    client = None # Initialize client variable
+    client = None
 
     try:
         client = initialize_client(cloud_config)
-        if not client:
-            raise ConnectionError("Client initialization failed (check credentials/endpoint).")
+        if not client: raise ConnectionError("Client initialization failed (check credentials/endpoint).")
 
         bucket_name = cloud_config['bucket_name']
         filename = progress_data['filename']
 
-        # --- MODIFIED: Size Check for Cloudflare R2 AND Oracle Cloud ---
-        SIZE_LIMIT_GB = 19.5 # Define the common limit
-        # Check if the current cloud requires a size limit check
+        # --- Size Check for Cloudflare R2 AND Oracle Cloud ---
+        SIZE_LIMIT_GB = 19.5
         if cloud_name == R2_CONFIG['name'] or cloud_name == OCI_CONFIG['name']:
             print(f"DEBUG: Performing size check for {cloud_name} (Limit: {SIZE_LIMIT_GB}GB).")
             progress_data['clouds'][cloud_name]['stage'] = 'checking'
             progress_data['clouds'][cloud_name]['message'] = f'Checking bucket size (Limit: {SIZE_LIMIT_GB}GB)...'
             update_job_progress(job_id, progress_data)
-
-            if not os.path.exists(temp_filepath):
-                 raise FileNotFoundError(f"Temporary file not found: {temp_filepath}")
+            if not os.path.exists(temp_filepath): raise FileNotFoundError(f"Temporary file not found: {temp_filepath}")
             new_file_size = os.path.getsize(temp_filepath)
-            max_bytes = SIZE_LIMIT_GB * 1024 ** 3 # Convert GB limit to bytes
+            max_bytes = SIZE_LIMIT_GB * 1024 ** 3
             existing_size = get_bucket_size(client, bucket_name)
-
             print(f"DEBUG: {cloud_name} - Existing: {existing_size}, New: {new_file_size}, Total: {existing_size + new_file_size}, Max: {max_bytes}")
-
             if existing_size + new_file_size > max_bytes:
                 excess_gb = ((existing_size + new_file_size) - max_bytes) / 1024**3
                 msg = f"Skipped: Would exceed {SIZE_LIMIT_GB}GB limit by {excess_gb:.2f} GB."
-                print(f"DEBUG: {cloud_name} - {msg}") # Log skip reason
+                print(f"DEBUG: {cloud_name} - {msg}")
                 progress_data['clouds'][cloud_name] = {'stage': 'skipped', 'percentage': 0, 'message': msg}
                 update_job_progress(job_id, progress_data)
-                return # Skip this specific upload
-            else:
-                 print(f"DEBUG: {cloud_name} - Size check passed.")
+                return
+            else: print(f"DEBUG: {cloud_name} - Size check passed.")
         # --- End Size Check ---
 
-
         # --- Check file existence and size ---
-        if not os.path.exists(temp_filepath):
-             raise FileNotFoundError(f"Temporary file not found before upload: {temp_filepath}")
+        if not os.path.exists(temp_filepath): raise FileNotFoundError(f"Temporary file not found before upload: {temp_filepath}")
         file_size = os.path.getsize(temp_filepath)
         if file_size == 0:
-            msg = "Skipped: File size is 0 bytes."
-            progress_data['clouds'][cloud_name] = {'stage': 'skipped', 'percentage': 0, 'message': msg}
-            update_job_progress(job_id, progress_data)
-            return
+            msg = "Skipped: File size is 0 bytes."; progress_data['clouds'][cloud_name] = {'stage': 'skipped', 'percentage': 0, 'message': msg}; update_job_progress(job_id, progress_data); return
 
         # --- Start upload using upload_file for ALL clouds ---
         progress_callback = ProgressTracker(job_id, cloud_name, file_size, progress_data)
-        transfer_config = TransferConfig( # Define TransferConfig for all
-            multipart_threshold=8 * 1024 * 1024,
-            max_concurrency=10,
-            multipart_chunksize=8 * 1024 * 1024,
-            use_threads=True
-        )
-
-        # Update status to uploading before starting
+        transfer_config = TransferConfig(multipart_threshold=8*1024*1024, max_concurrency=10, multipart_chunksize=8*1024*1024, use_threads=True)
         progress_data['clouds'][cloud_name]['stage'] = 'uploading'
         progress_data['clouds'][cloud_name]['percentage'] = 0
         progress_data['clouds'][cloud_name]['message'] = f"0 MB / {file_size / (1024*1024):.2f} MB (Starting...)"
         update_job_progress(job_id, progress_data)
-
         print(f"DEBUG: Using upload_file for {cloud_name}.")
-        upload_args = {
-            'Filename': temp_filepath,
-            'Bucket': bucket_name,
-            'Key': filename,
-            'Callback': progress_callback,
-            'Config': transfer_config # Use TransferConfig for ALL clouds
-        }
+        upload_args = {'Filename': temp_filepath, 'Bucket': bucket_name, 'Key': filename, 'Callback': progress_callback, 'Config': transfer_config}
         client.upload_file(**upload_args)
         # --- End Upload Logic ---
 
-        upload_success = True # Assume success if no exception raised
+        upload_success = True
         print(f"DEBUG: Upload seems successful for {cloud_name}, job {job_id}")
 
     except Exception as e:
@@ -382,43 +403,16 @@ def upload_file_to_cloud_task(job_id, cloud_config, temp_filepath, progress_data
         print(f"ERROR Type: {type(e).__name__}")
 
     # --- Update final status and generate URL ---
-    # (Keep the existing URL generation logic)
     if upload_success and client:
-        progress_data['clouds'][cloud_name]['stage'] = 'generating_url'
-        progress_data['clouds'][cloud_name]['message'] = 'Generating URL...'
-        update_job_progress(job_id, progress_data)
-
+        progress_data['clouds'][cloud_name]['stage'] = 'generating_url'; progress_data['clouds'][cloud_name]['message'] = 'Generating URL...'; update_job_progress(job_id, progress_data)
         if cloud_name == 'Oracle Cloud':
-            final_url = generate_oci_public_url(
-                cloud_config.get('oci_namespace'),
-                cloud_config.get('oci_region'),
-                bucket_name,
-                filename
-            )
-            if not final_url:
-                 print(f"DEBUG: OCI public URL failed or not applicable for {filename}, using presigned.")
-                 final_url = generate_presigned_url(client, bucket_name, filename, expiration=604800)
-                 url_type = "Presigned (7 days)"
-            else:
-                 url_type = "Public (Permanent*)"
-        else:
-            final_url = generate_presigned_url(client, bucket_name, filename, expiration=604800)
-            url_type = "Presigned (7 days)"
-
-        if final_url:
-             # Just output the URL directly
-             msg = f"Complete. {url_type}: {final_url}"
-             progress_data['clouds'][cloud_name] = {'stage': 'completed', 'percentage': 100, 'message': msg}
-        else:
-             msg = "Complete (URL generation failed)."
-             progress_data['clouds'][cloud_name] = {'stage': 'completed', 'percentage': 100, 'message': msg}
-
-    elif not upload_success:
-        msg = error_message if error_message else "Upload failed: Unknown error"
-        progress_data['clouds'][cloud_name] = {'stage': 'failed', 'percentage': 0, 'message': msg}
-    elif not client:
-         msg = "Failed: Client initialization failed"
-         progress_data['clouds'][cloud_name] = {'stage': 'failed', 'percentage': 0, 'message': msg}
-
+            final_url = generate_oci_public_url(cloud_config.get('oci_namespace'), cloud_config.get('oci_region'), bucket_name, filename)
+            if not final_url: final_url = generate_presigned_url(client, bucket_name, filename, expiration=604800); url_type = "Presigned (7 days)"
+            else: url_type = "Public (Permanent*)"
+        else: final_url = generate_presigned_url(client, bucket_name, filename, expiration=604800); url_type = "Presigned (7 days)"
+        if final_url: msg = f"Complete. {url_type}: {final_url}"; progress_data['clouds'][cloud_name] = {'stage': 'completed', 'percentage': 100, 'message': msg}
+        else: msg = "Complete (URL generation failed)."; progress_data['clouds'][cloud_name] = {'stage': 'completed', 'percentage': 100, 'message': msg}
+    elif not upload_success: msg = error_message if error_message else "Upload failed: Unknown error"; progress_data['clouds'][cloud_name] = {'stage': 'failed', 'percentage': 0, 'message': msg}
+    elif not client: msg = "Failed: Client initialization failed"; progress_data['clouds'][cloud_name] = {'stage': 'failed', 'percentage': 0, 'message': msg}
     update_job_progress(job_id, progress_data)
 # --- END upload_file_to_cloud_task ---
