@@ -78,12 +78,12 @@ def main(job_id, url, filename):
 
 if __name__ == "__main__":
     # This script is called as: python worker.py <job_id> <url> <filename>
-    if len(sys.argv) != 4:
+    if len(sys.argv) != 5:
         print("Usage: python worker.py <job_id> <url> <filename>")
         sys.exit(1)
         
     job_id = sys.argv[1]
     url = sys.argv[2]
-    filename = sys.argv[3]
+    filename = sys.argv[4]
     
     main(job_id, url, filename)

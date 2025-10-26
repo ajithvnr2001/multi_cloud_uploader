@@ -13,6 +13,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy all the python code into the container
 COPY . .
 
+# --- NEW: Explicitly copy worker.py again ---
+COPY worker.py .
+# --- END NEW ---
+
 # Create directories for job state and temporary downloads
 RUN mkdir -p /app/job_status
 RUN mkdir -p /app/temp_downloads
